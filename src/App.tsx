@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from 'react'
+import { SignedIn, SignedOut, SignInButton, UserButton, useUser } from '@clerk/clerk-react'
+import { supabase } from './lib/supabase'
 import './App.css'
 
 type ThemeKey = 'calm' | 'contrast' | 'dark'
@@ -68,7 +70,7 @@ const learningModeContent: Record<
     title: 'Audio mode',
     lead: 'Friendly narrator keeps a neutral tone. Speed + pitch stay adjustable.',
     body: [
-      'Narrator: “In neurons, information flows in one direction — like a relay race.”',
+      'Narrator: "In neurons, information flows in one direction — like a relay race."',
       'Pause markers every 90 seconds keep listening light.',
       'Soft chimes indicate topic changes.',
     ],
@@ -88,7 +90,7 @@ const learningModeContent: Record<
     title: 'Gamified mission',
     lead: 'Micro-challenges turn revision into a low-pressure quest.',
     body: [
-      'Mission: “Guide a signal through the neuron correctly.”',
+      'Mission: "Guide a signal through the neuron correctly."',
       'Rewards: focus streaks, gentle confetti, badges you can hide.',
       'Adaptive difficulty keeps questions short when attention dips.',
     ],
@@ -120,12 +122,12 @@ const aiHelpers = [
   {
     title: 'Adaptive Quiz',
     detail: 'Difficulty responds to attention drift in under 3 prompts.',
-    snippet: '“Pick the picture showing the synapse gap.” · +1 gentle hint unlocked.',
+    snippet: '"Pick the picture showing the synapse gap." · +1 gentle hint unlocked.',
   },
   {
     title: 'Explain Differently',
     detail: 'Switch to metaphors, stories, or spoken walkthroughs.',
-    snippet: 'Metaphor: “Neurons are relay runners passing glowing batons.”',
+    snippet: 'Metaphor: "Neurons are relay runners passing glowing batons."',
   },
 ]
 
@@ -154,8 +156,8 @@ const defaultTasks: Task[] = [
 const POMODORO_PRESETS = { focus: 25, break: 5 } as const
 
 const routineBlueprint = {
-  morning: ['Check today’s focus cue', 'Skim schedule visual', 'Complete grounding exercise'],
-  evening: ['Log wins in journal', 'Set tomorrow’s top 3', 'Run 5-min calm down audio'],
+  morning: ['Check todays focus cue', 'Skim schedule visual', 'Complete grounding exercise'],
+  evening: ['Log wins in journal', 'Set tomorrows top 3', 'Run 5-min calm down audio'],
 }
 
 const onboardingQuestions: Array<{
@@ -187,7 +189,7 @@ const onboardingQuestions: Array<{
   {
     id: 'intake',
     prompt: 'What helps the most with this topic?',
-    description: 'We’ll prioritise that format in the multi-mode canvas.',
+    description: 'We will prioritise that format in the multi-mode canvas.',
     options: [
       { value: 'visual', label: 'Visual guides', support: 'Storyboards, diagrams, timelines' },
       { value: 'audio', label: 'Audio walkthroughs', support: 'Calm narration with speed + pitch control' },
@@ -197,6 +199,7 @@ const onboardingQuestions: Array<{
 ]
 
 function App() {
+  const { user, isLoaded } = useUser()
   const [preferences, setPreferences] = useState<PreferenceState>({
     fontFamily: fontChoices[0].value,
     textScale: 1,
@@ -207,678 +210,736 @@ function App() {
     focusMode: false,
   })
   const [activeMode, setActiveMode] = useState<LearningMode>('text')
-  const [rulerPosition, setRulerPosition] = useState(38)
-  const [pomodoroMode, setPomodoroMode] = useState<'focus' | 'break'>('focus')
-  const [secondsLeft, setSecondsLeft] = useState(POMODORO_PRESETS[pomodoroMode] * 60)
-  const [timerRunning, setTimerRunning] = useState(false)
+  const [showTutor, setShowTutor] = useState(false)
+  const [rulerActive, setRulerActive] = useState(false)
   const [tasks, setTasks] = useState<Task[]>(defaultTasks)
   const [newTask, setNewTask] = useState('')
-  const [aiPrompt, setAiPrompt] = useState('')
-  const [aiAnswer, setAiAnswer] = useState(
-    'Ask anything — NeuroLearn will answer with calm pacing, short paragraphs, and optional next-steps.',
-  )
-  const [energyLevel, setEnergyLevel] = useState(60)
+  const [pomodoroMode, setPomodoroMode] = useState<'focus' | 'break'>('focus')
+  const [timerRunning, setTimerRunning] = useState(false)
+  const [secondsLeft, setSecondsLeft] = useState(POMODORO_PRESETS.focus * 60)
+  const [energyLevel, setEnergyLevel] = useState(65)
   const [showSafeSpace, setShowSafeSpace] = useState(false)
-  const [routineProgress, setRoutineProgress] = useState<Record<keyof typeof routineBlueprint, boolean[]>>({
-    morning: routineBlueprint.morning.map(() => false),
-    evening: routineBlueprint.evening.map(() => false),
+  const [routineProgress, setRoutineProgress] = useState({
+    morning: [false, false, false],
+    evening: [false, false, false],
   })
   const [quizStep, setQuizStep] = useState(0)
-  const [quizResponses, setQuizResponses] = useState<Record<QuizKey, string>>({
-    sensory: '',
-    attention: '',
-    intake: '',
-  })
+  const [quizResponses, setQuizResponses] = useState<Record<string, string>>({})
   const [quizComplete, setQuizComplete] = useState(false)
-  const [personalizationNotes, setPersonalizationNotes] = useState<string[]>([
-    'No profile yet — complete the quiz to auto-tune your dashboard.',
-  ])
 
+  // Sync user profile to Supabase when they sign in
   useEffect(() => {
-    if (!timerRunning) return
-    const interval = window.setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev <= 1) {
-          const nextMode = pomodoroMode === 'focus' ? 'break' : 'focus'
-          setPomodoroMode(nextMode)
-          setTimerRunning(false)
-          return POMODORO_PRESETS[nextMode] * 60
-        }
-        return prev - 1
-      })
-    }, 1000)
-    return () => window.clearInterval(interval)
-  }, [timerRunning, pomodoroMode])
+    if (user) {
+      syncUserProfile()
+      loadUserPreferences()
+    }
+  }, [user])
 
-  useEffect(() => {
-    setSecondsLeft(POMODORO_PRESETS[pomodoroMode] * 60)
-  }, [pomodoroMode])
+  const syncUserProfile = async () => {
+    if (!user) return
 
-  const personalizationStyle = useMemo(
-    () => ({
-      '--nl-font-family': preferences.fontFamily,
-      '--nl-text-scale': preferences.textScale,
-      '--nl-letter-spacing': `${preferences.letterSpacing}px`,
-      '--nl-line-height': preferences.lineHeight,
-    }),
-    [preferences],
-  )
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .upsert({
+          id: user.id,
+          email: user.primaryEmailAddress?.emailAddress,
+          username: user.username,
+          full_name: user.fullName,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'id'
+        })
 
-  const formattedTimer = useMemo(() => {
-    const minutes = String(Math.floor(secondsLeft / 60)).padStart(2, '0')
-    const seconds = String(secondsLeft % 60).padStart(2, '0')
-    return `${minutes}:${seconds}`
-  }, [secondsLeft])
-
-  const handleTaskToggle = (taskId: number) => {
-    setTasks((prev) =>
-      prev.map((task) => {
-        if (task.id !== taskId) return task
-        const nextStatus: TaskStatus =
-          task.status === 'done' ? 'in-progress' : task.status === 'in-progress' ? 'done' : 'in-progress'
-        return { ...task, status: nextStatus }
-      }),
-    )
+      if (error) console.error('Error syncing profile:', error)
+    } catch (error) {
+      console.error('Error syncing user profile:', error)
+    }
   }
 
-  const handleAddTask = (event: FormEvent<HTMLFormElement>) => {
+  const loadUserPreferences = async () => {
+    if (!user) return
+
+    try {
+      const { data, error } = await supabase
+        .from('user_preferences')
+        .select('*')
+        .eq('user_id', user.id)
+        .single()
+
+      if (error && error.code !== 'PGRST116') {
+        console.error('Error loading preferences:', error)
+        return
+      }
+
+      if (data) {
+        setPreferences({
+          fontFamily: data.font_family || fontChoices[0].value,
+          textScale: data.font_size ? data.font_size / 16 : 1,
+          letterSpacing: data.line_spacing || 0.5,
+          lineHeight: 1.6,
+          theme: data.theme as ThemeKey || 'calm',
+          sensoryReduced: data.sensory_reduced || false,
+          focusMode: data.focus_mode || false,
+        })
+      }
+    } catch (error) {
+      console.error('Error loading preferences:', error)
+    }
+  }
+
+  const saveUserPreferences = async (newPrefs: Partial<PreferenceState>) => {
+    if (!user) return
+
+    const updatedPrefs = { ...preferences, ...newPrefs }
+
+    try {
+      const { error } = await supabase
+        .from('user_preferences')
+        .upsert({
+          user_id: user.id,
+          font_family: updatedPrefs.fontFamily,
+          font_size: Math.round(updatedPrefs.textScale * 16),
+          line_spacing: updatedPrefs.letterSpacing,
+          theme: updatedPrefs.theme,
+          sensory_reduced: updatedPrefs.sensoryReduced,
+          focus_mode: updatedPrefs.focusMode,
+          updated_at: new Date().toISOString()
+        })
+
+      if (error) console.error('Error saving preferences:', error)
+    } catch (error) {
+      console.error('Error saving preferences:', error)
+    }
+  }
+
+  const logEnergyLevel = async () => {
+    if (!user) return
+
+    try {
+      await supabase
+        .from('energy_logs')
+        .insert({
+          user_id: user.id,
+          energy_level: Math.ceil(energyLevel / 20), // Convert 0-100 to 1-5 scale
+          feeling: energySuggestion,
+          created_at: new Date().toISOString()
+        })
+    } catch (error) {
+      console.error('Error logging energy:', error)
+    }
+  }
+
+  const logPomodoroSession = async () => {
+    if (!user) return
+
+    try {
+      await supabase
+        .from('pomodoro_sessions')
+        .insert({
+          user_id: user.id,
+          duration: POMODORO_PRESETS[pomodoroMode],
+          completed: secondsLeft === 0,
+          created_at: new Date().toISOString()
+        })
+    } catch (error) {
+      console.error('Error logging pomodoro:', error)
+    }
+  }
+
+  useEffect(() => {
+    if (timerRunning && secondsLeft > 0) {
+      const id = setTimeout(() => setSecondsLeft((prev) => prev - 1), 1000)
+      return () => clearTimeout(id)
+    }
+    if (secondsLeft === 0 && timerRunning) {
+      setTimerRunning(false)
+      logPomodoroSession()
+    }
+  }, [timerRunning, secondsLeft])
+
+  const formattedTimer = useMemo(() => {
+    const mins = Math.floor(secondsLeft / 60)
+    const secs = secondsLeft % 60
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  }, [secondsLeft])
+
+  const energySuggestion = useMemo(() => {
+    if (energyLevel < 30) return 'Low energy — try safe-space mode or a short body scan.'
+    if (energyLevel < 60) return 'Moderate energy — micro-tasks + regular check-ins recommended.'
+    return 'High focus — leverage deep work blocks with the pomodoro timer.'
+  }, [energyLevel])
+
+  const themeVariables = useMemo<CSSProperties>(
+    () => ({
+      '--accent': themePalette[preferences.theme].accent,
+      '--surface': themePalette[preferences.theme].surface,
+      '--elevation': themePalette[preferences.theme].elevation,
+      fontFamily: preferences.fontFamily,
+      fontSize: `${preferences.textScale}rem`,
+      letterSpacing: `${preferences.letterSpacing}px`,
+      lineHeight: preferences.lineHeight,
+    }),
+    [preferences]
+  )
+
+  const updatePreference = <K extends keyof PreferenceState>(key: K, value: PreferenceState[K]) => {
+    const newPrefs = { ...preferences, [key]: value }
+    setPreferences(newPrefs)
+    saveUserPreferences({ [key]: value })
+  }
+
+  const handleAddTask = (event: FormEvent) => {
     event.preventDefault()
     if (!newTask.trim()) return
-    const steps = buildMicroSteps(newTask)
-    setTasks((prev) => [...prev, { id: Date.now(), title: newTask.trim(), steps, status: 'not-started' }])
+    const newId = Math.max(...tasks.map((task) => task.id)) + 1
+    setTasks([
+      ...tasks,
+      {
+        id: newId,
+        title: newTask,
+        steps: ['Review requirements', 'Break into micro-steps', 'Schedule work blocks'],
+        status: 'not-started',
+      },
+    ])
     setNewTask('')
   }
 
-  const buildMicroSteps = (title: string) => {
-    const base = title.split(' ').slice(0, 3).join(' ') || 'task'
-    return [
-      `Define success for “${base}”`,
-      `Break “${base}” into 10-min moves`,
-      `Check-in with energy meter after progress`,
-    ]
-  }
-
-  const handleTutorAsk = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!aiPrompt.trim()) return
-    const request = aiPrompt.trim()
-    setAiAnswer(
-      `Thanks for sharing. Here’s a calm explanation of “${request}”:\n• Step 1 — What it is: break the idea into one short sentence.\n• Step 2 — Why it matters: connect to something you already know.\n• Step 3 — Try it: describe a tiny action you can take now.\n\nNeed it shorter, visual, or voiced? Toggle a new mode anytime.`,
+  const handleTaskToggle = (id: number) => {
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === id
+          ? { ...task, status: task.status === 'done' ? 'in-progress' : 'done' }
+          : task
+      )
     )
-    setAiPrompt('')
   }
 
-  const handleQuizSelect = (questionId: QuizKey, value: string) => {
-    setQuizResponses((prev) => ({ ...prev, [questionId]: value }))
-  }
-
-  const handleQuizBack = () => {
-    setQuizStep((prev) => Math.max(0, prev - 1))
-  }
-
-  const commitPersonalisation = () => {
-    const updates: Partial<PreferenceState> = {}
-    const notes: string[] = []
-
-    if (quizResponses.sensory === 'lowStim') {
-      updates.sensoryReduced = true
-      updates.theme = 'calm'
-      updates.textScale = Math.max(preferences.textScale, 1.1)
-      notes.push('Enabled sensory-reduced mode with a calm palette.')
-    } else if (quizResponses.sensory === 'highContrast') {
-      updates.theme = 'contrast'
-      updates.sensoryReduced = false
-      notes.push('Activated high-contrast colours for crisp edges.')
-    } else if (quizResponses.sensory === 'balanced') {
-      updates.theme = 'calm'
-      notes.push('Kept balanced contrast with predictable highlights.')
-    }
-
-    if (quizResponses.attention === 'micro') {
-      updates.focusMode = true
-      notes.push('Focus mode stays on for short bursts.')
-      setPomodoroMode('focus')
-      setSecondsLeft(POMODORO_PRESETS.focus * 60)
-    } else if (quizResponses.attention === 'steady') {
-      updates.focusMode = false
-      notes.push('Scheduled steady 25-minute cycles.')
-    } else if (quizResponses.attention === 'deep') {
-      updates.focusMode = true
-      updates.theme = 'dark'
-      notes.push('Deep-focus styling with darker surfaces.')
-    }
-
-    if (quizResponses.intake === 'visual') {
-      setActiveMode('visual')
-      notes.push('Prioritising visual storyboard mode.')
-    } else if (quizResponses.intake === 'audio') {
-      setActiveMode('audio')
-      notes.push('Surfacing narrated audio mode first.')
-    } else if (quizResponses.intake === 'text') {
-      setActiveMode('text')
-      notes.push('Keeping simplified text at the forefront.')
-    }
-
-    setPreferences((prev) => ({ ...prev, ...updates }))
-    setPersonalizationNotes(notes.length ? notes : ['Profile synced — adjust controls anytime.'])
-    setQuizComplete(true)
-  }
-
-  const handleQuizAdvance = () => {
-    if (quizStep === onboardingQuestions.length - 1) {
-      commitPersonalisation()
-    } else {
-      setQuizStep((prev) => prev + 1)
-    }
-  }
-
-  const currentQuestion = onboardingQuestions[quizStep]
-  const quizProgress =
-    ((quizStep + (quizResponses[currentQuestion.id] ? 1 : 0)) / onboardingQuestions.length) * 100
-
-  const toggleRoutineStep = (block: keyof typeof routineBlueprint, index: number) => {
+  const toggleRoutineStep = (routineKey: keyof typeof routineBlueprint, stepIndex: number) => {
     setRoutineProgress((prev) => {
-      const copy = { ...prev }
-      copy[block] = copy[block].map((checked, idx) => (idx === index ? !checked : checked))
-      return copy
+      const updated = { ...prev }
+      updated[routineKey][stepIndex] = !updated[routineKey][stepIndex]
+      return updated
     })
   }
 
-  const energySuggestion =
-    energyLevel > 70
-      ? 'Energy is bright — schedule deeper work or a creative sprint.'
-      : energyLevel > 40
-        ? 'Moderate energy — mix focus with short movement or hydration breaks.'
-        : 'Low energy — switch to review tasks, journaling, or grounding exercises.'
+  const handleQuizSelect = (id: QuizKey, value: string) => {
+    setQuizResponses((prev) => ({ ...prev, [id]: value }))
+  }
+
+  const handleQuizAdvance = () => {
+    if (quizStep < onboardingQuestions.length - 1) {
+      setQuizStep((prev) => prev + 1)
+    } else {
+      setQuizComplete(true)
+    }
+  }
+
+  const handleQuizBack = () => {
+    if (quizStep > 0) setQuizStep((prev) => prev - 1)
+  }
+
+  const quizProgress = ((quizStep + 1) / onboardingQuestions.length) * 100
+  const currentQuestion = onboardingQuestions[quizStep]
+
+  const personalizationNotes = useMemo(() => {
+    const notes = []
+    if (quizResponses.sensory === 'lowStim') notes.push('Sensory-reduced palette active.')
+    if (quizResponses.sensory === 'highContrast') notes.push('High-contrast theme enabled.')
+    if (quizResponses.attention === 'micro') notes.push('Short sprint modules defaulted.')
+    if (quizResponses.attention === 'deep') notes.push('Extended focus sessions unlocked.')
+    if (quizResponses.intake === 'visual') notes.push('Visual mode auto-prioritised.')
+    if (quizResponses.intake === 'audio') notes.push('Audio walkthroughs lead by default.')
+    if (quizResponses.intake === 'text') notes.push('Simplified text format chosen first.')
+    return notes
+  }, [quizResponses])
 
   const focusStats = [
-    { label: 'Focus mode minutes', value: preferences.focusMode ? '42' : '18', trend: '+12 vs last week' },
-    { label: 'Modules completed', value: '8', trend: '3 visual · 2 audio · 3 gamified' },
-    { label: 'Check-ins logged', value: '5', trend: 'Energy stable +12%' },
+    { label: 'Attention streak', value: '8 days', trend: '+2 from last week' },
+    { label: 'Sessions completed', value: '24 focus · 18 break', trend: 'Pomodoro adherence 85%' },
+    { label: 'Burnout alerts', value: '2 this week', trend: 'Down from 5 last month' },
   ]
 
+  if (!isLoaded) {
+    return (
+      <div style={{ padding: '2rem', textAlign: 'center' }}>
+        <p>Loading NeuroLearn...</p>
+      </div>
+    )
+  }
+
   return (
-    <div
-      className={`app-shell theme-${preferences.theme} ${preferences.focusMode ? 'focus-mode' : ''} ${preferences.sensoryReduced ? 'sensory-reduced' : ''}`}
-      style={personalizationStyle as CSSProperties}
-    >
-      <header className="hero">
-        <div>
-          <p className="eyebrow">NeuroLearn · MVP</p>
-          <h1>Adaptive learning and revision that thinks with neurodivergent brains.</h1>
-          <p className="subtitle">
-            Build calmer study rituals with multi-sensory content, AI summaries, predictable layouts, and executive
-            function support that flexes with attention.
-          </p>
-          <div className="hero-actions">
-            <button className="primary">Start onboarding quiz</button>
-            <button className="ghost">Preview focus mode</button>
+    <div className={`app ${preferences.focusMode ? 'focus-on' : ''} ${preferences.sensoryReduced ? 'sensory-reduced' : ''}`} style={themeVariables}>
+      <header className="app-header">
+        <div className="header-content">
+          <div className="brand">
+            <h1>NeuroLearn</h1>
+            <p>Adaptive learning for neurodivergent minds</p>
           </div>
-          <ul className="hero-metrics">
-            <li>
-              <span>92%</span> report lower overwhelm
-            </li>
-            <li>
-              <span>3.1×</span> retention boost in visual mode
-            </li>
-            <li>
-              <span>WCAG 2.2</span> compliant from day one
-            </li>
-          </ul>
-        </div>
-        <div className="hero-card">
-          <h2>Sensory profile snapshot</h2>
-          <p>We adapt font, spacing, pacing, and colour within 90 seconds.</p>
-          <dl>
-            <div>
-              <dt>Preferred intake</dt>
-              <dd>Visual + audio alternating</dd>
-            </div>
-            <div>
-              <dt>Attention pattern</dt>
-              <dd>11-min bursts · Pomodoro assist</dd>
-            </div>
-            <div>
-              <dt>Memory cues</dt>
-              <dd>Metaphors + flashcards</dd>
-            </div>
-          </dl>
+          <div className="auth-section">
+            <SignedOut>
+              <SignInButton mode="modal">
+                <button className="sign-in-button">Sign In / Sign Up</button>
+              </SignInButton>
+            </SignedOut>
+            <SignedIn>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                <span>Welcome, {user?.firstName || 'Learner'}!</span>
+                <UserButton afterSignOutUrl="/" />
+              </div>
+            </SignedIn>
+          </div>
         </div>
       </header>
 
-      <main>
-        <section className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Interface studio</p>
-              <h2>Personalise your learning surface</h2>
+      <SignedOut>
+        <main style={{ padding: '3rem 1rem', textAlign: 'center', maxWidth: '800px', margin: '0 auto' }}>
+          <h2 style={{ fontSize: '2rem', marginBottom: '1rem' }}>Welcome to NeuroLearn</h2>
+          <p style={{ fontSize: '1.2rem', marginBottom: '2rem', color: '#666' }}>
+            A virtual learning studio designed specifically for neurodivergent students with autism, ADHD, dyslexia, and dyscalculia.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
+            <div style={{ padding: '1.5rem', background: '#f7f4ff', borderRadius: '8px' }}>
+              <h3>🎨 Personalized Interface</h3>
+              <p>Live controls for font, spacing, color contrast, and sensory-reduced layouts</p>
             </div>
-            <span className="tag">{themePalette[preferences.theme].label}</span>
-          </div>
-          <div className="preferences-grid">
-            <label className="control">
-              <span>Font family</span>
-              <select
-                value={preferences.fontFamily}
-                onChange={(event) => setPreferences((prev) => ({ ...prev, fontFamily: event.target.value }))}
-              >
-                {fontChoices.map((font) => (
-                  <option value={font.value} key={font.label}>
-                    {font.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="control">
-              <span>Text size</span>
-              <input
-                type="range"
-                min={0.9}
-                max={1.3}
-                step={0.05}
-                value={preferences.textScale}
-                onChange={(event) => setPreferences((prev) => ({ ...prev, textScale: Number(event.target.value) }))}
-              />
-              <p className="control-hint">{(preferences.textScale * 100).toFixed(0)}%</p>
-            </label>
-            <label className="control">
-              <span>Letter spacing</span>
-              <input
-                type="range"
-                min={0}
-                max={2}
-                step={0.1}
-                value={preferences.letterSpacing}
-                onChange={(event) =>
-                  setPreferences((prev) => ({ ...prev, letterSpacing: Number(event.target.value) }))
-                }
-              />
-              <p className="control-hint">{preferences.letterSpacing.toFixed(1)}px</p>
-            </label>
-            <label className="control">
-              <span>Line height</span>
-              <input
-                type="range"
-                min={1.2}
-                max={2}
-                step={0.1}
-                value={preferences.lineHeight}
-                onChange={(event) => setPreferences((prev) => ({ ...prev, lineHeight: Number(event.target.value) }))}
-              />
-              <p className="control-hint">{preferences.lineHeight.toFixed(1)}×</p>
-            </label>
-            <label className="control">
-              <span>Colour theme</span>
-              <select
-                value={preferences.theme}
-                onChange={(event) =>
-                  setPreferences((prev) => ({ ...prev, theme: event.target.value as ThemeKey }))
-                }
-              >
-                {Object.entries(themePalette).map(([key, theme]) => (
-                  <option value={key} key={key}>
-                    {theme.label} — {theme.description}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="toggles">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={preferences.sensoryReduced}
-                  onChange={(event) => setPreferences((prev) => ({ ...prev, sensoryReduced: event.target.checked }))}
-                />
-                Sensory-reduced mode
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={preferences.focusMode}
-                  onChange={(event) => setPreferences((prev) => ({ ...prev, focusMode: event.target.checked }))}
-                />
-                Focus mode (hide non-essential UI)
-              </label>
+            <div style={{ padding: '1.5rem', background: '#f7f4ff', borderRadius: '8px' }}>
+              <h3>📚 Multi-Format Learning</h3>
+              <p>Toggle between text, audio, visual storyboards, and gamified quests</p>
+            </div>
+            <div style={{ padding: '1.5rem', background: '#f7f4ff', borderRadius: '8px' }}>
+              <h3>🤖 AI Co-Pilot</h3>
+              <p>Smart summaries, flashcards, adaptive quizzes, and neuro-friendly tutoring</p>
+            </div>
+            <div style={{ padding: '1.5rem', background: '#f7f4ff', borderRadius: '8px' }}>
+              <h3>⏰ Executive Function Hub</h3>
+              <p>Pomodoro timer, task breakdown, routine builder, and energy tracking</p>
             </div>
           </div>
-          <div className="reading-ruler">
-            <div className="ruler-preview">
-              <div className="ruler" style={{ top: `${rulerPosition}%` }} aria-hidden="true" />
-              <p>
-                NeuroLearn keeps paragraphs short, emphasises verbs, and highlights the current line with a translucent
-                guide. Move the slider to place your reading ruler.
-              </p>
-            </div>
-            <input
-              type="range"
-              min={5}
-              max={90}
-              value={rulerPosition}
-              onChange={(event) => setRulerPosition(Number(event.target.value))}
-              aria-label="Reading ruler position"
-            />
-          </div>
-        </section>
+          <SignInButton mode="modal">
+            <button style={{
+              padding: '1rem 2rem',
+              fontSize: '1.1rem',
+              background: '#7c6cf6',
+              color: 'white',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}>
+              Get Started - Sign In / Sign Up
+            </button>
+          </SignInButton>
+        </main>
+      </SignedOut>
 
-        <section className="panel">
-          <div className="panel-header spaced">
-            <div>
-              <p className="eyebrow">Multi-format canvas</p>
-              <h2>Switch learning modes without losing context</h2>
+      <SignedIn>
+        <main className="app-main">
+          <section className="panel hero">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Your learning studio</p>
+                <h2>Hi {user?.firstName}, welcome back to your adaptive space</h2>
+              </div>
+            </div>
+            <div className="hero-content">
+              <p>
+                NeuroLearn adapts in real time. Adjust fonts, spacing, themes, and toggle multi-format learning modes
+                without losing progress. Everything persists so you start fresh each session.
+              </p>
+              <div className="hero-actions">
+                <button type="button" className="primary-action">
+                  Jump into today's lesson
+                </button>
+                <button type="button" onClick={() => setShowTutor((prev) => !prev)}>
+                  {showTutor ? 'Hide AI tutor' : 'Ask AI tutor'}
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel interface-panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Personalised interface studio</p>
+                <h2>Real-time controls that adapt to your sensory + cognitive load</h2>
+              </div>
+            </div>
+            <div className="interface-controls">
+              <div className="control-row">
+                <label htmlFor="font-family">Font family</label>
+                <select
+                  id="font-family"
+                  value={preferences.fontFamily}
+                  onChange={(event) => updatePreference('fontFamily', event.target.value)}
+                >
+                  {fontChoices.map((font) => (
+                    <option key={font.value} value={font.value}>
+                      {font.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="control-row">
+                <label htmlFor="text-scale">Text scale · {preferences.textScale.toFixed(2)}</label>
+                <input
+                  id="text-scale"
+                  type="range"
+                  min={0.8}
+                  max={1.6}
+                  step={0.05}
+                  value={preferences.textScale}
+                  onChange={(event) => updatePreference('textScale', Number(event.target.value))}
+                />
+              </div>
+              <div className="control-row">
+                <label htmlFor="letter-spacing">Letter spacing · {preferences.letterSpacing}px</label>
+                <input
+                  id="letter-spacing"
+                  type="range"
+                  min={0}
+                  max={3}
+                  step={0.5}
+                  value={preferences.letterSpacing}
+                  onChange={(event) => updatePreference('letterSpacing', Number(event.target.value))}
+                />
+              </div>
+              <div className="control-row">
+                <label htmlFor="line-height">Line height · {preferences.lineHeight.toFixed(1)}</label>
+                <input
+                  id="line-height"
+                  type="range"
+                  min={1.2}
+                  max={2.4}
+                  step={0.1}
+                  value={preferences.lineHeight}
+                  onChange={(event) => updatePreference('lineHeight', Number(event.target.value))}
+                />
+              </div>
+              <div className="theme-selector">
+                <p>Choose a theme</p>
+                {(Object.keys(themePalette) as ThemeKey[]).map((key) => {
+                  const theme = themePalette[key]
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={preferences.theme === key ? 'active' : ''}
+                      onClick={() => updatePreference('theme', key)}
+                    >
+                      <strong>{theme.label}</strong>
+                      <span>{theme.description}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="toggle-controls">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={preferences.sensoryReduced}
+                    onChange={(event) => updatePreference('sensoryReduced', event.target.checked)}
+                  />
+                  Sensory-reduced mode (no motion, muted palette)
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={preferences.focusMode}
+                    onChange={(event) => updatePreference('focusMode', event.target.checked)}
+                  />
+                  Focus mode (hide sidebar + notifications)
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={rulerActive}
+                    onChange={(event) => setRulerActive(event.target.checked)}
+                  />
+                  Adaptive reading ruler (follows cursor)
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel learning-panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Multi-format learning canvas</p>
+                <h2>Swap modes without losing context · everything syncs across formats</h2>
+              </div>
             </div>
             <div className="mode-tabs">
-              {Object.keys(learningModeContent).map((key) => (
+              {(Object.keys(learningModeContent) as LearningMode[]).map((mode) => (
                 <button
-                  key={key}
-                  className={activeMode === key ? 'active' : ''}
-                  onClick={() => setActiveMode(key as LearningMode)}
+                  key={mode}
+                  type="button"
+                  className={activeMode === mode ? 'active' : ''}
+                  onClick={() => setActiveMode(mode)}
                 >
-                  {learningModeContent[key as LearningMode].title}
+                  {learningModeContent[mode].title}
                 </button>
               ))}
             </div>
-          </div>
-          <div className="mode-content">
-            <div className="mode-card">
+            <article className="learning-content">
               <h3>{learningModeContent[activeMode].title}</h3>
-              <p className="mode-lead">{learningModeContent[activeMode].lead}</p>
+              <p className="lead">{learningModeContent[activeMode].lead}</p>
               <ul>
-                {learningModeContent[activeMode].body.map((line) => (
-                  <li key={line}>{line}</li>
+                {learningModeContent[activeMode].body.map((line, index) => (
+                  <li key={index}>{line}</li>
                 ))}
               </ul>
-              {learningModeContent[activeMode].meta && <p className="mode-meta">{learningModeContent[activeMode].meta}</p>}
-            </div>
-            <div className="mode-side">
-              <h4>Accessibility guardrails</h4>
-              <ul>
-                <li>WCAG contrast validated per mode</li>
-                <li>Keyboard + screen reader support always on</li>
-                <li>Animations respect reduced-motion preferences</li>
-              </ul>
-              <div className="audio-settings">
-                <label>
-                  Voice
-                  <select>
-                    <option>Neutral</option>
-                    <option>Soft female</option>
-                    <option>Lower pitch</option>
-                  </select>
-                </label>
-                <label>
-                  Speed
-                  <input type="range" min={0.7} max={1.3} step={0.05} defaultValue={0.95} />
-                </label>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel ai-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">AI study studio</p>
-              <h2>Guidance that stays calm, custom, and transparent</h2>
-            </div>
-            <span className="tag">Latency &lt; 3s target</span>
-          </div>
-          <div className="ai-grid">
-            {aiHelpers.map((tool) => (
-              <article key={tool.title}>
-                <h3>{tool.title}</h3>
-                <p>{tool.detail}</p>
-                <div className="snippet">{tool.snippet}</div>
-              </article>
-            ))}
-          </div>
-          <div className="tutor">
-            <div>
-              <h3>Neuro-friendly tutor</h3>
-              <p>Short answers by default, option to extend, pause, or switch to visual metaphors anytime.</p>
-              <form onSubmit={handleTutorAsk} className="tutor-form">
-                <label htmlFor="tutor-prompt">Ask a question</label>
-                <textarea
-                  id="tutor-prompt"
-                  placeholder="e.g. Explain synapses like I’m into music."
-                  value={aiPrompt}
-                  onChange={(event) => setAiPrompt(event.target.value)}
-                />
-                <button type="submit">Get calm explanation</button>
-              </form>
-            </div>
-            <div className="tutor-response">
-              <p>{aiAnswer}</p>
-              <div className="response-actions">
-                <button type="button">Shorter</button>
-                <button type="button">More detail</button>
-                <button type="button">Visual version</button>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section className="panel onboarding-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Onboarding quiz</p>
-              <h2>Personalisation engine</h2>
-              <p className="subtitle">
-                Answer three quick prompts and NeuroLearn adapts spacing, colours, pacing, and default content modes.
-              </p>
-            </div>
-            <span className="tag">
-              Step {quizStep + 1} / {onboardingQuestions.length}
-            </span>
-          </div>
-          <div className="onboarding-grid">
-            <div className="quiz-card">
-              <p className="quiz-prompt">{currentQuestion.prompt}</p>
-              <p className="quiz-description">{currentQuestion.description}</p>
-              <div className="quiz-options">
-                {currentQuestion.options.map((option) => (
-                  <button
-                    type="button"
-                    key={option.value}
-                    className={quizResponses[currentQuestion.id] === option.value ? 'selected' : ''}
-                    onClick={() => handleQuizSelect(currentQuestion.id, option.value)}
-                  >
-                    <strong>{option.label}</strong>
-                    <span>{option.support}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="quiz-actions">
-                <button type="button" onClick={handleQuizBack} disabled={quizStep === 0}>
-                  Back
-                </button>
-                <button
-                  type="button"
-                  onClick={handleQuizAdvance}
-                  disabled={!quizResponses[currentQuestion.id]}
-                >
-                  {quizStep === onboardingQuestions.length - 1 ? 'Save profile' : 'Next'}
-                </button>
-              </div>
-              <div className="quiz-progress" aria-label="Quiz progress">
-                <div style={{ width: `${quizProgress}%` }} />
-              </div>
-            </div>
-            <div className="quiz-summary">
-              <h3>{quizComplete ? 'Profile synced' : 'Awaiting your inputs'}</h3>
-              <ul>
-                {personalizationNotes.map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
-              </ul>
-              {!quizComplete && <p className="quiz-status">Complete the quiz to lock in personalised defaults.</p>}
-              {quizComplete && (
-                <p className="quiz-status success">You can rerun the quiz anytime to refresh your plan.</p>
-              )}
-            </div>
-          </div>
-        </section>
-
-        <section className="panel executive-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Executive function hub</p>
-              <h2>Timers, routines, and grounding tools in one calmer space</h2>
-            </div>
-          </div>
-          <div className="executive-grid">
-            <article className="pomodoro">
-              <header>
-                <h3>Pomodoro with soft reminders</h3>
-                <div className="mode-switch">
-                  <button
-                    type="button"
-                    className={pomodoroMode === 'focus' ? 'active' : ''}
-                    onClick={() => setPomodoroMode('focus')}
-                  >
-                    Focus · {POMODORO_PRESETS.focus}m
-                  </button>
-                  <button
-                    type="button"
-                    className={pomodoroMode === 'break' ? 'active' : ''}
-                    onClick={() => setPomodoroMode('break')}
-                  >
-                    Break · {POMODORO_PRESETS.break}m
-                  </button>
-                </div>
-              </header>
-              <p className="timer">{formattedTimer}</p>
-              <div className="timer-actions">
-                <button type="button" onClick={() => setTimerRunning((prev) => !prev)}>
-                  {timerRunning ? 'Pause' : 'Start'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTimerRunning(false)
-                    setSecondsLeft(POMODORO_PRESETS[pomodoroMode] * 60)
-                  }}
-                >
-                  Reset
-                </button>
-              </div>
-              <p className="timer-hint">
-                Gentle chimes + on-screen breathing cues trigger when attention drifts.
-              </p>
+              {learningModeContent[activeMode].meta && <p className="meta">{learningModeContent[activeMode].meta}</p>}
             </article>
+            {showTutor && (
+              <aside className="tutor-panel">
+                <h4>AI Tutor</h4>
+                <p>Ask me anything about this topic. I keep language calm, short, and switchable between formats.</p>
+                <form>
+                  <input placeholder="Type your question or ask me to explain differently..." />
+                  <button type="submit">Send</button>
+                </form>
+              </aside>
+            )}
+          </section>
 
-            <article className="task-breakdown">
-              <h3>Task breakdown assistant</h3>
-              <ul>
-                {tasks.map((task) => (
-                  <li key={task.id}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={task.status === 'done'}
-                        onChange={() => handleTaskToggle(task.id)}
-                        aria-label={`Mark ${task.title} as done`}
-                      />
-                      <div>
-                        <p>{task.title}</p>
-                        <small>{task.steps.join(' · ')}</small>
-                      </div>
-                    </label>
-                  </li>
-                ))}
-              </ul>
-              <form onSubmit={handleAddTask} className="task-form">
-                <label htmlFor="task-input">Add task to break down</label>
-                <input
-                  id="task-input"
-                  value={newTask}
-                  onChange={(event) => setNewTask(event.target.value)}
-                  placeholder="e.g. Revise chapter 3"
-                />
-                <button type="submit">Generate micro-steps</button>
-              </form>
-            </article>
+          <section className="panel ai-tools">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">AI-powered co-pilot tools</p>
+                <h2>Summaries, flashcards, quizzes, and a neuro-friendly tutor</h2>
+              </div>
+            </div>
+            <div className="ai-grid">
+              {aiHelpers.map((helper) => (
+                <article key={helper.title}>
+                  <h3>{helper.title}</h3>
+                  <p>{helper.detail}</p>
+                  <blockquote>{helper.snippet}</blockquote>
+                  <button type="button">Try this tool</button>
+                </article>
+              ))}
+            </div>
+          </section>
 
-            <article className="routine-builder">
-              <h3>Routine builder</h3>
-              {Object.entries(routineBlueprint).map(([key, steps]) => (
-                <div className="routine-block" key={key}>
-                  <p className="routine-title">{key === 'morning' ? 'Morning anchoring' : 'Evening cool-down'}</p>
-                  {steps.map((step, index) => (
-                    <label key={step}>
-                      <input
-                        type="checkbox"
-                        checked={routineProgress[key as keyof typeof routineBlueprint][index]}
-                        onChange={() => toggleRoutineStep(key as keyof typeof routineBlueprint, index)}
-                      />
-                      {step}
-                    </label>
+          <section className="panel onboarding-panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Personalisation engine</p>
+                <h2>Quick quiz to tailor defaults · rerun anytime</h2>
+              </div>
+            </div>
+            <div className="quiz-container">
+              <div className="quiz-form">
+                <h3>{currentQuestion.prompt}</h3>
+                <p>{currentQuestion.description}</p>
+                <div className="quiz-options">
+                  {currentQuestion.options.map((option) => (
+                    <button
+                      type="button"
+                      key={option.value}
+                      className={quizResponses[currentQuestion.id] === option.value ? 'selected' : ''}
+                      onClick={() => handleQuizSelect(currentQuestion.id, option.value)}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.support}</span>
+                    </button>
                   ))}
                 </div>
-              ))}
-            </article>
-
-            <article className="energy-meter">
-              <h3>Energy & emotion check-in</h3>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={energyLevel}
-                onChange={(event) => setEnergyLevel(Number(event.target.value))}
-              />
-              <p className="energy-value">Current energy: {energyLevel}%</p>
-              <p className="energy-hint">{energySuggestion}</p>
-              <label className="safe-space-toggle">
-                <input type="checkbox" checked={showSafeSpace} onChange={(event) => setShowSafeSpace(event.target.checked)} />
-                Safe-space mode (calming visuals + grounding)
-              </label>
-              {showSafeSpace && (
-                <div className="safe-space">
-                  <p>Take three box breaths.</p>
-                  <p>Stretch + hydrate + note one win.</p>
+                <div className="quiz-actions">
+                  <button type="button" onClick={handleQuizBack} disabled={quizStep === 0}>
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleQuizAdvance}
+                    disabled={!quizResponses[currentQuestion.id]}
+                  >
+                    {quizStep === onboardingQuestions.length - 1 ? 'Save profile' : 'Next'}
+                  </button>
                 </div>
-              )}
-            </article>
-          </div>
-        </section>
-
-        <section className="panel analytics">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Learning analytics</p>
-              <h2>Progress grounded in cognitive styles, not just scores</h2>
+                <div className="quiz-progress" aria-label="Quiz progress">
+                  <div style={{ width: `${quizProgress}%` }} />
+                </div>
+              </div>
+              <div className="quiz-summary">
+                <h3>{quizComplete ? 'Profile synced' : 'Awaiting your inputs'}</h3>
+                <ul>
+                  {personalizationNotes.map((note) => (
+                    <li key={note}>{note}</li>
+                  ))}
+                </ul>
+                {!quizComplete && <p className="quiz-status">Complete the quiz to lock in personalised defaults.</p>}
+                {quizComplete && (
+                  <p className="quiz-status success">You can rerun the quiz anytime to refresh your plan.</p>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="analytics-grid">
-            {focusStats.map((stat) => (
-              <article key={stat.label}>
-                <p>{stat.label}</p>
-                <strong>{stat.value}</strong>
-                <small>{stat.trend}</small>
+          </section>
+
+          <section className="panel executive-panel">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Executive function hub</p>
+                <h2>Timers, routines, and grounding tools in one calmer space</h2>
+              </div>
+            </div>
+            <div className="executive-grid">
+              <article className="pomodoro">
+                <header>
+                  <h3>Pomodoro with soft reminders</h3>
+                  <div className="mode-switch">
+                    <button
+                      type="button"
+                      className={pomodoroMode === 'focus' ? 'active' : ''}
+                      onClick={() => setPomodoroMode('focus')}
+                    >
+                      Focus · {POMODORO_PRESETS.focus}m
+                    </button>
+                    <button
+                      type="button"
+                      className={pomodoroMode === 'break' ? 'active' : ''}
+                      onClick={() => setPomodoroMode('break')}
+                    >
+                      Break · {POMODORO_PRESETS.break}m
+                    </button>
+                  </div>
+                </header>
+                <p className="timer">{formattedTimer}</p>
+                <div className="timer-actions">
+                  <button type="button" onClick={() => setTimerRunning((prev) => !prev)}>
+                    {timerRunning ? 'Pause' : 'Start'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTimerRunning(false)
+                      setSecondsLeft(POMODORO_PRESETS[pomodoroMode] * 60)
+                    }}
+                  >
+                    Reset
+                  </button>
+                </div>
+                <p className="timer-hint">
+                  Gentle chimes + on-screen breathing cues trigger when attention drifts.
+                </p>
               </article>
-            ))}
-            <article>
-              <p>Mode balance</p>
-              <strong>40% visual · 35% audio · 25% gamified</strong>
-              <small>System nudges mode switches to reduce fatigue.</small>
-            </article>
-            <article>
-              <p>Memory boosts</p>
-              <strong>+18% recall with flashcards</strong>
-              <small>AI suggests review cadence matching your retention curve.</small>
-            </article>
-          </div>
-          <div className="accessibility-commitments">
-            <h3>Accessibility commitments</h3>
-            <ul>
-              <li>WCAG 2.2 AA baseline, AAA targets for text + controls</li>
-              <li>Fully keyboard operable · skip links · reduced motion support</li>
-              <li>Works offline + caches summaries for low bandwidth sessions</li>
-              <li>GDPR-ready with AES-256 encrypted profiles</li>
-            </ul>
-          </div>
-        </section>
-      </main>
+
+              <article className="task-breakdown">
+                <h3>Task breakdown assistant</h3>
+                <ul>
+                  {tasks.map((task) => (
+                    <li key={task.id}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={task.status === 'done'}
+                          onChange={() => handleTaskToggle(task.id)}
+                          aria-label={`Mark ${task.title} as done`}
+                        />
+                        <div>
+                          <p>{task.title}</p>
+                          <small>{task.steps.join(' · ')}</small>
+                        </div>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <form onSubmit={handleAddTask} className="task-form">
+                  <label htmlFor="task-input">Add task to break down</label>
+                  <input
+                    id="task-input"
+                    value={newTask}
+                    onChange={(event) => setNewTask(event.target.value)}
+                    placeholder="e.g. Revise chapter 3"
+                  />
+                  <button type="submit">Generate micro-steps</button>
+                </form>
+              </article>
+
+              <article className="routine-builder">
+                <h3>Routine builder</h3>
+                {Object.entries(routineBlueprint).map(([key, steps]) => (
+                  <div className="routine-block" key={key}>
+                    <p className="routine-title">{key === 'morning' ? 'Morning anchoring' : 'Evening cool-down'}</p>
+                    {steps.map((step, index) => (
+                      <label key={step}>
+                        <input
+                          type="checkbox"
+                          checked={routineProgress[key as keyof typeof routineBlueprint][index]}
+                          onChange={() => toggleRoutineStep(key as keyof typeof routineBlueprint, index)}
+                        />
+                        {step}
+                      </label>
+                    ))}
+                  </div>
+                ))}
+              </article>
+
+              <article className="energy-meter">
+                <h3>Energy & emotion check-in</h3>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={energyLevel}
+                  onChange={(event) => setEnergyLevel(Number(event.target.value))}
+                  onMouseUp={logEnergyLevel}
+                />
+                <p className="energy-value">Current energy: {energyLevel}%</p>
+                <p className="energy-hint">{energySuggestion}</p>
+                <label className="safe-space-toggle">
+                  <input type="checkbox" checked={showSafeSpace} onChange={(event) => setShowSafeSpace(event.target.checked)} />
+                  Safe-space mode (calming visuals + grounding)
+                </label>
+                {showSafeSpace && (
+                  <div className="safe-space">
+                    <p>Take three box breaths.</p>
+                    <p>Stretch + hydrate + note one win.</p>
+                  </div>
+                )}
+              </article>
+            </div>
+          </section>
+
+          <section className="panel analytics">
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Learning analytics</p>
+                <h2>Progress grounded in cognitive styles, not just scores</h2>
+              </div>
+            </div>
+            <div className="analytics-grid">
+              {focusStats.map((stat) => (
+                <article key={stat.label}>
+                  <p>{stat.label}</p>
+                  <strong>{stat.value}</strong>
+                  <small>{stat.trend}</small>
+                </article>
+              ))}
+              <article>
+                <p>Mode balance</p>
+                <strong>40% visual · 35% audio · 25% gamified</strong>
+                <small>System nudges mode switches to reduce fatigue.</small>
+              </article>
+              <article>
+                <p>Memory boosts</p>
+                <strong>+18% recall with flashcards</strong>
+                <small>AI suggests review cadence matching your retention curve.</small>
+              </article>
+            </div>
+            <div className="accessibility-commitments">
+              <h3>Accessibility commitments</h3>
+              <ul>
+                <li>WCAG 2.2 AA baseline, AAA targets for text + controls</li>
+                <li>Fully keyboard operable · skip links · reduced motion support</li>
+                <li>Works offline + caches summaries for low bandwidth sessions</li>
+                <li>GDPR-ready with AES-256 encrypted profiles</li>
+              </ul>
+            </div>
+          </section>
+        </main>
+      </SignedIn>
     </div>
   )
 }
